@@ -14,15 +14,32 @@ shape_map = {}
 for shape in shape_lib.shapes():
     shape_map[shape.name()] = new_shape_lib.addShape(shape.name(), shape.geometry())
 
-base_geo        = node.inputs()[1].geometry()
+variation_geo   = node.inputs()[1].geometry()
 pca_analyse_geo = node.inputs()[2].geometry()
 pca_project_geo = node.inputs()[3].geometry()
 
 
+selected_layer_name = node.parent().evalParm("layername")
+layer = next((l for l in definitionNew.layers() if l.name() == selected_layer_name), None)
+if layer is None:
+    raise hou.Error(f"Layer'{selected_layer_name}' not found")
+    
+baseshape        = node.parent().evalParm("baseshape_attrib")
+baseshape_name   = variation_geo.prim(0).attribValue(baseshape)    
+    
+base_points = None
+for binding in layer.bindings():
+    if binding.shape().name() == baseshape_name:
+        base_points = binding.shape().geometry().pointFloatAttribValues("P")
+        break
+
+if base_points is None:
+    raise hou.Error(f"Shape '{baseshape_name}' not found in layer'{selected_layer_name}'")
+        
 components  = pca_analyse_geo.pointIntAttribValues("component")
 evals       = pca_analyse_geo.pointFloatAttribValues("eval")
 positions   = pca_analyse_geo.pointFloatAttribValues("P")
-base_points = base_geo.pointFloatAttribValues("P")
+
 
 component_points = defaultdict(list)
 component_evals  = {}
@@ -58,7 +75,7 @@ for comp_idx in kept_indices:
         pt = comp_geo.createPoint()
         pt.setPosition(base_pos + pos)
 
-    comp_name = f"body/pca_component_{comp_idx}"
+    comp_name = f"element/pca_component_{comp_idx}"
     pca_shapes.append(new_shape_lib.addShape(comp_name, comp_geo))
     pca_channels.append(f"pca_{comp_idx}")
 
@@ -77,7 +94,7 @@ for i, channel in enumerate(pca_channels):
 
 
 # -- wire PCA component as blendshape targets ---
-base_shape = shape_map.get("/geo/head0")
+base_shape = shape_map.get(baseshape_name)
 if base_shape:
     base_shape.addBlendshapeInputs(pca_shapes, pca_channels)
     base_shape.setBlendshapeDeformerParms(attribs="P", point_id_attrib="id")
