@@ -1,132 +1,120 @@
-from collections import defaultdict
+import numpy as np
+from collections import defaultdict                                                                  
+import hou      
 
-node = hou.pwd()                                                                                    
-geo  = node.geometry()                                                                              
-                                                                                              
-definition    = hou.crowds.findAgentDefinitions(geo)[0]                                             
-definitionNew = definition.freeze()                                                                 
-          
-shape_lib = definitionNew.shapeLibrary().freeze()
-rig       = definitionNew.rig().freeze()
+node = hou.pwd()
+geo  = node.geometry()
+hda  = node.parent()
+
+# --- agent definition setup ---
+definition    = hou.crowds.findAgentDefinitions(geo)[0]
+definitionNew = definition.freeze()
+shape_lib     = definitionNew.shapeLibrary().freeze()
+rig           = definitionNew.rig().freeze()
 
 new_shape_lib = hou.AgentShapeLibrary()
-shape_map = {}
+shape_map     = {}
 for shape in shape_lib.shapes():
-    shape_map[shape.name()] = new_shape_lib.addShape(shape.name(), shape.geometry())
+  shape_map[shape.name()] = new_shape_lib.addShape(shape.name(), shape.geometry())
 
-variation_geo   = node.inputs()[1].geometry()
-pca_analyse_geo = node.inputs()[2].geometry()
-pca_project_geo = node.inputs()[3].geometry()
+# --- read merged delta geometry ---
+delta_geo      = node.inputs()[1].geometry()
+tags_arr       = delta_geo.pointStringAttribValues("tag")
+channels_arr   = delta_geo.pointStringAttribValues("channel_name")
+baseshapes_arr = delta_geo.pointStringAttribValues("blendshape_baseshape")
+positions_arr  = delta_geo.pointFloatAttribValues("P")
 
+# group: delta_groups[tag][baseshape][channel_name] = [[dx,dy,dz], ...]
+delta_groups = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+for i in range(len(tags_arr)):
+  delta_groups[tags_arr[i]][baseshapes_arr[i]][channels_arr[i]].append(
+      [positions_arr[i*3], positions_arr[i*3+1], positions_arr[i*3+2]]
+  )
 
-selected_layer_name = node.parent().evalParm("layername")
-layer = next((l for l in definitionNew.layers() if l.name() == selected_layer_name), None)
-if layer is None:
-    raise hou.Error(f"Layer'{selected_layer_name}' not found")
-    
-baseshape        = node.parent().evalParm("baseshape_attrib")
-baseshape_name   = variation_geo.prim(0).attribValue(baseshape)    
-    
-base_points = None
-for binding in layer.bindings():
-    if binding.shape().name() == baseshape_name:
-        base_points = binding.shape().geometry().pointFloatAttribValues("P")
-        break
+# accumulate blendshape inputs per baseshape
+# (multiple tags may share the same baseshape)
+baseshape_inputs = defaultdict(lambda: {"shapes": [], "channels": []})
 
-if base_points is None:
-    raise hou.Error(f"Shape '{baseshape_name}' not found in layer'{selected_layer_name}'")
-        
-components  = pca_analyse_geo.pointIntAttribValues("component")
-evals       = pca_analyse_geo.pointFloatAttribValues("eval")
-positions   = pca_analyse_geo.pointFloatAttribValues("P")
+# pca results for fbuild_agent_info
+pca_data = {}
 
+# --- run PCA per (tag, baseshape) ---
+for tag, baseshape_dict in delta_groups.items():
+  pca_data[tag] = {}
 
-component_points = defaultdict(list)
-component_evals  = {}
+  for baseshape, variation_dict in baseshape_dict.items():
+      variation_names = sorted(variation_dict.keys())
+      n_variations    = len(variation_names)
+      n_points        = len(variation_dict[variation_names[0]])
 
-for i, comp_idx in enumerate(components):
-    pos = hou.Vector3(positions[i*3], positions[i*3+1], positions[i*3+2])
-    component_points[comp_idx].append(pos)
-    component_evals[comp_idx] = evals[i]
+      # build delta matrix: (n_variations, n_points * 3)
+      X = np.zeros((n_variations, n_points * 3))
+      for i, var_name in enumerate(variation_names):
+          X[i] = np.array(variation_dict[var_name]).flatten()
 
-    
-variance_threshold = node.parent().parm("variance_threshold") 
+      # SVD — same as what Houdini PCA SOP does internally
+      U, S, Vt = np.linalg.svd(X, full_matrices=False)
+      keep_n = min(n_variations, len(S))
 
-# --- 95% variance threshold ---
-evals_sorted = [(idx, val) for idx, val in sorted(component_evals.items())]
-total        = sum(val for _, val in evals_sorted)
-cumsum       = 0
-keep_n       = 0
-for idx, val in evals_sorted:
-  cumsum += val
-  keep_n += 1
-  if cumsum / total >= variance_threshold.eval():
-      break
-      
-# --- register PCA components as shapes ---
-pca_shapes   = []
-pca_channels = []
-kept_indices = sorted(component_points.keys())[:keep_n]
+      # base points from shape library
+      base_ref = shape_map.get(baseshape)
+      if not base_ref:
+          raise hou.Error(f"Base shape '{baseshape}' not found in shape library")
+      base_pts = np.array(base_ref.geometry().pointFloatAttribValues("P")).reshape(-1, 3)
 
-for comp_idx in kept_indices:
-    comp_geo = hou.Geometry()
-    for j, pos in enumerate(component_points[comp_idx]):
-        base_pos = hou.Vector3(base_points[j*3], base_points[j*3+1], base_points[j*3+2])
-        pt = comp_geo.createPoint()
-        pt.setPosition(base_pos + pos)
+      element_name = baseshape.split("/")[-1]
+      tag_clean    = tag.replace(" ", "_")
 
-    comp_name = f"element/pca_component_{comp_idx}"
-    pca_shapes.append(new_shape_lib.addShape(comp_name, comp_geo))
-    pca_channels.append(f"pca_{comp_idx}")
+      pca_shapes   = []
+      pca_channels = []
 
-# --- build variation -> weights lookup from all projected bodies
-names   = pca_project_geo.pointStringAttribValues("name")
-weights = pca_project_geo.pointFloatAttribValues("weight")
+      for j in range(keep_n):
+          # component direction (unit vector in shape space)
+          comp_delta = Vt[j].reshape(n_points, 3)
+          comp_pts   = base_pts + comp_delta
 
+          comp_geo = hou.Geometry()
+          comp_geo = hou.Geometry()
+          comp_geo.createPoints([                                                                              
+              hou.Vector3(float(comp_pts[k, 0]), float(comp_pts[k, 1]), float(comp_pts[k, 2]))
+              for k in range(n_points)
+          ])
 
-variation_weights = defaultdict(list)
-for i, name in enumerate(names):
-    variation_weights[name].append(weights[i])
-        
-# register PCA channel with neutral default
-for i, channel in enumerate(pca_channels):
-    rig.addChannel(channel, default_value=0.0)
+          comp_name    = f"{element_name}_{tag_clean}/pca_component_{j}"
+          channel_name = f"{element_name}_{tag_clean}_pca_{j}"
 
+          pca_shapes.append(new_shape_lib.addShape(comp_name, comp_geo))
+          pca_channels.append(channel_name)
 
-# -- wire PCA component as blendshape targets ---
-base_shape = shape_map.get(baseshape_name)
-if base_shape:
-    base_shape.addBlendshapeInputs(pca_shapes, pca_channels)
-    base_shape.setBlendshapeDeformerParms(attribs="P", point_id_attrib="id")
+      for ch in pca_channels:
+          rig.addChannel(ch, default_value=0.0)
 
-# --- store lookup as Vex flat arrays --
-names_list = list(variation_weights.keys())
-weights_flat = []
-for name in names_list:
-    for comp_idx in kept_indices:
-        weights_flat.append(variation_weights[name][comp_idx])
-    
-num_channels = len(pca_channels)
+      # accumulate — don't call addBlendshapeInputs yet
+      baseshape_inputs[baseshape]["shapes"].extend(pca_shapes)
+      baseshape_inputs[baseshape]["channels"].extend(pca_channels)
 
-geo.addArrayAttrib(hou.attribType.Global, "pca_variation_names", hou.attribData.String, 1)
-geo.addArrayAttrib(hou.attribType.Global, "pca_variation_weights", hou.attribData.Float, 1)
-geo.addArrayAttrib(hou.attribType.Global, "pca_channel_names", hou.attribData.String, 1)
-geo.addAttrib(hou.attribType.Global, "pca_num_channels", 0)
+      # weights: U[i,j] * S[j] reconstructs variation i from component j
+      variation_weights = {}
+      for i, var_name in enumerate(variation_names):
+          variation_weights[var_name] = [float(U[i, j] * S[j]) for j in range(keep_n)]
 
-geo.setGlobalAttribValue("pca_variation_names", names_list)
-geo.setGlobalAttribValue("pca_variation_weights", weights_flat)
-geo.setGlobalAttribValue("pca_channel_names", pca_channels)
-geo.setGlobalAttribValue("pca_num_channels", num_channels)
+      pca_data[tag][baseshape] = {
+          "channels":   pca_channels,
+          "variations": variation_weights
+      }
 
+# --- wire blendshape inputs once per baseshape ---
+for baseshape, inputs in baseshape_inputs.items():
+  base_ref = shape_map.get(baseshape)
+  base_ref.addBlendshapeInputs(inputs["shapes"], inputs["channels"])
+  base_ref.setBlendshapeDeformerParms(attribs="P", point_id_attrib="id")
 
+# --- store PCA data in fbuild_agent_info per agent point ---
+for point in geo.points():
+  info = dict(point.attribValue("fbuild_agent_info"))
+  info["pca"] = pca_data
+  point.setAttribValue("fbuild_agent_info", info)
 
+# --- publish ---
 definitionNew = definitionNew.freeze(new_shapelib=new_shape_lib, new_rig=rig)
 hou.crowds.replaceAgentDefinitions(geo, {definition: definitionNew})
-    
-
-
-
-
-
-
-    
