@@ -29,7 +29,7 @@ keep_n = 0
 for idx, val in evals_sorted:
     cumsum += val
     keep_n += 1
-    if cumsum / total >= 0.2:
+    if cumsum / total >= 0.99:
         break
 
 kept_indices = sorted(component_evals.keys())[:keep_n]
