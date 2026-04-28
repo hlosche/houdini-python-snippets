@@ -1,43 +1,70 @@
-import hou                                                                                                                       
+import hou
+import random
 
-node = hou.pwd()                                                                                                                 
+node = hou.pwd()
 geo  = node.geometry()
 hda  = node.parent()
 
-selected_tag       = node.evalParm("selected_tag")
+selected_tags      = node.evalParm("selected_tag").split()
 selected_variation = node.evalParm("selected_variation")
 
-all_ch_names = []
-all_weights  = []
-tag_layers   = []  # NEW
+geo.addArrayAttrib(hou.attribType.Point, "pca_channel_names",     hou.attribData.String, 1)
+geo.addArrayAttrib(hou.attribType.Point, "pca_variation_weights", hou.attribData.Float,  1)
+geo.addArrayAttrib(hou.attribType.Point, "pca_tag_layers",        hou.attribData.String, 1)
 
 for point in geo.points():
-  info = point.attribValue("fbuild_agent_info")
-  pca  = info.get("pca", {})
+    info = point.attribValue("fbuild_agent_info")
+    pca  = info.get("pca", {})
 
-  if selected_tag not in pca:
-      continue
+    available_tags = [t for t in selected_tags if t in pca]
+    if not available_tags:
+        continue
 
-  for baseshape, bs_data in pca[selected_tag].items():
-      if selected_variation in bs_data["variations"]:
-          all_ch_names.extend(bs_data["channels"])
-          all_weights.extend(bs_data["variations"][selected_variation])
+    if len(available_tags) > 1:
+        random.seed(point.number())
+        chosen_tag = random.choice(available_tags)
 
-  # NEW — extract layers once from first valid point
-  if not tag_layers:
-      layers_info = info.get("layers", {})
-      tag_layers  = [
-          layer_name
-          for layer_name, layer_data in layers_info.items()
-          if selected_tag in layer_data.get("tag", [])
-      ]
+        variations = set()
+        for bs_data in pca[chosen_tag].values():
+            variations.update(bs_data["variations"].keys())
 
-geo.addArrayAttrib(hou.attribType.Global, "pca_channel_names",     hou.attribData.String, 1)
-geo.addArrayAttrib(hou.attribType.Global, "pca_variation_weights", hou.attribData.Float,  1)
-geo.addAttrib(     hou.attribType.Global, "pca_num_channels", 0)
-geo.addArrayAttrib(hou.attribType.Global, "pca_tag_layers",        hou.attribData.String, 1)  # NEW
+        if not variations:
+            continue
 
-geo.setGlobalAttribValue("pca_channel_names",     all_ch_names)
-geo.setGlobalAttribValue("pca_variation_weights", all_weights)
-geo.setGlobalAttribValue("pca_num_channels",      len(all_ch_names))
-geo.setGlobalAttribValue("pca_tag_layers",        tag_layers)  # NEW
+        chosen_variation = random.choice(sorted(variations))
+
+        ch_names = []
+        weights  = []
+        for bs_data in pca[chosen_tag].values():
+            if chosen_variation in bs_data["variations"]:
+                ch_names.extend(bs_data["channels"])
+                weights.extend(bs_data["variations"][chosen_variation])
+
+        layers_info = info.get("layers", {})
+        tag_layers  = [
+            layer_name
+            for layer_name, layer_data in layers_info.items()
+            if chosen_tag in layer_data.get("tag", [])
+        ]
+
+    else:
+        chosen_tag = available_tags[0]
+        ch_names   = []
+        weights    = []
+        tag_layers = []
+
+        for bs_data in pca[chosen_tag].values():
+            if selected_variation in bs_data["variations"]:
+                ch_names.extend(bs_data["channels"])
+                weights.extend(bs_data["variations"][selected_variation])
+
+        layers_info = info.get("layers", {})
+        tag_layers  = [
+            layer_name
+            for layer_name, layer_data in layers_info.items()
+            if chosen_tag in layer_data.get("tag", [])
+        ]
+
+    point.setAttribValue("pca_channel_names",     ch_names)
+    point.setAttribValue("pca_variation_weights", weights)
+    point.setAttribValue("pca_tag_layers",        tag_layers)
