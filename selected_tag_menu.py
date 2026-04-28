@@ -1,17 +1,17 @@
 import crowdstoolutils
 
-node   = kwargs["node"]
+node = kwargs["node"]
 inputs = node.inputs()
 if not inputs or inputs[0] is None:
-    return []
+  return []
 
 geo = inputs[0].geometry()
 if not geo or not geo.points():
-    return []
+  return []
 
 info = geo.points()[0].attribValue("fbuild_agent_info")
 if not info:
-    return []
+  return []
 
 pca  = info.get("pca", {})
 tags = sorted(pca.keys())
