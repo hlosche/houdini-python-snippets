@@ -1,7 +1,8 @@
-string ch_names[]   = detail(0, "pca_channel_names", 0);                                                                         
-float  weights[]    = detail(0, "pca_variation_weights", 0);                                                                     
-int    n            = detail(0, "pca_num_channels", 0);                                                                          
-string tag_layers[] = detail(0, "pca_tag_layers", 0);                                                                            
+string ch_names[]   = point(0, "pca_channel_names",     @primnum);
+float  weights[]    = point(0, "pca_variation_weights", @primnum);
+string tag_layers[] = point(0, "pca_tag_layers",        @primnum);
+
+int n = len(ch_names);
 
 for (int i = 0; i < n; i++)
 {
