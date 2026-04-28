@@ -13,12 +13,14 @@ info = geo.points()[0].attribValue("fbuild_agent_info")
 if not info:
     return []
 
-selected_tag = node.evalParm("selected_tag")
-pca          = info.get("pca", {})
-if selected_tag not in pca:
-    return []
+selected_tags = node.evalParm("selected_tag").split()
+pca           = info.get("pca", {})
 
 variations = set()
-for bs_data in pca[selected_tag].values():
-    variations.update(bs_data["variations"].keys())
+for selected_tag in selected_tags:
+    if selected_tag not in pca:
+        continue
+    for bs_data in pca[selected_tag].values():
+        variations.update(bs_data["variations"].keys())
+
 return crowdstoolutils.buildMenuStringList(sorted(variations))
